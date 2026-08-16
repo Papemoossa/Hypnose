@@ -1,0 +1,19 @@
+{
+  "name": "RELAX MIND — Relaxation guidée",
+  "short_name": "RELAX MIND",
+  "description": "Programme de relaxation guidée et d'auto-hypnose à domicile : 30 séances audio de 15 à 30 minutes.",
+  "lang": "fr",
+  "dir": "ltr",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#08161b",
+  "theme_color": "#0b1f26",
+  "categories": ["health", "lifestyle", "medical"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
