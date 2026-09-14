@@ -1,12 +1,19 @@
 /* ==========================================================================
    RELAX MIND — application
    Aucune dépendance externe. Fonctionne hors connexion.
+
+   v3.1 (2026-09) — Étape A : branchement sur la nouvelle base Supabase
+     • envoyer()   : nouveau payload (seance_numero, seance_titre, voix_source,
+                     app_version, appareil) ciblant la table `ecoute`.
+     • tirerSync() : lecture depuis `ecoute` avec compatibilité rétro (accepte
+                     l'ancien champ seance_id des lignes rm_seances existantes).
+   Le reste est identique à la v3.0.
    ========================================================================== */
 (function () {
 "use strict";
 
 var CFG = window.RM_CONFIG || {};
-var VERSION = CFG.version || "3.0.0";
+var VERSION = CFG.version || "3.1.0";
 
 /* ═══════════════════════════════ OUTILS ═══════════════════════════════ */
 var $  = function (s) { return document.querySelector(s); };
@@ -55,7 +62,7 @@ function dbVide() {
       delaiHeures: CFG.delaiHeures != null ? CFG.delaiHeures : 48,
       dureeDefaut: CFG.dureeDefaut || 20,
       etude: CFG.etude || "",
-      sync: Object.assign({ actif: false, url: "", key: "", table: "rm_seances" }, CFG.sync || {})
+      sync: Object.assign({ actif: false, url: "", key: "", table: "ecoute" }, CFG.sync || {})
     },
     cree: Date.now()
   };
@@ -65,6 +72,12 @@ var DB = (function () {
   try { var r = JSON.parse(LS.getItem(CLE) || "null"); if (r) { for (var k in r) d[k] = r[k]; d.cfg = Object.assign(dbVide().cfg, r.cfg || {}); } } catch (e) {}
   return d;
 })();
+
+// v3.1 : migration douce du nom de table pour les installations existantes
+if (DB.cfg && DB.cfg.sync && DB.cfg.sync.table === "rm_seances") {
+  DB.cfg.sync.table = "ecoute";
+}
+
 var tSave = null;
 function save() { clearTimeout(tSave); tSave = setTimeout(function () { try { LS.setItem(CLE, JSON.stringify(DB)); } catch (e) {} }, 200); }
 function saveNow() { try { LS.setItem(CLE, JSON.stringify(DB)); } catch (e) {} }
@@ -145,7 +158,6 @@ function phrases(s) {
   });
   return res;
 }
-/* blocs = paragraphes ; unité d'enregistrement de la voix */
 function blocs(txt) {
   var segs = decoupe(txt), out = [], k = -1, cur = null;
   segs.forEach(function (g) {
@@ -161,7 +173,6 @@ function msBloc(b, rate, meta) {
   if (meta && meta[b.k] && meta[b.k].d) return meta[b.k].d * 1000 + 200;
   return msParole(b, rate);
 }
-/* étire les silences pour atteindre la durée visée */
 function monter(txt, cible, rate, sil, meta) {
   var segs = blocs(txt), parole = 0, pause = 0;
   segs.forEach(function (g) { if (g.t === "p") { g.ms *= sil; pause += g.ms; } else parole += msBloc(g, rate, meta); });
@@ -171,7 +182,6 @@ function monter(txt, cible, rate, sil, meta) {
   var total = 0; segs.forEach(function (g) { total += g.t === "p" ? g.ms : msBloc(g, rate, meta); });
   return { segs: segs, ms: total };
 }
-/* cadence effective d'une séance */
 function cadence(sid, p) {
   var c = DB.cadence[sid];
   if (c && c.perso) return { rate: c.rate, sil: c.sil, duree: c.duree };
@@ -209,7 +219,6 @@ function parler(txt, rate) {
   return u;
 }
 
-/* ── enregistrements : métadonnées par jeu ── */
 function metaJeu(jeuId, sid) {
   var m = {};
   Object.keys(DB.clips).forEach(function (id) {
@@ -531,7 +540,6 @@ function rendreJournal() {
 }
 function rendreVoix() {
   var p = P();
-  /* voix enregistrées */
   var dispo = DB.jeux.filter(function (j) { return toutes().some(function (s) { return jeuComplet(j.id, s.id); }); });
   $("#c-voix-enr").hidden = !dispo.length;
   var ce = $("#l-voix-enr"); ce.innerHTML = "";
@@ -542,7 +550,6 @@ function rendreVoix() {
       majPrefs(function (x) { x.voix = { type: "enr", jeu: j.id }; }); rendreVoix(); rendreListe();
     }, null));
   });
-  /* voix de l'appareil */
   var f = $("#l-voix-f"), m = $("#l-voix-m"), a = $("#l-voix-a");
   f.innerHTML = ""; m.innerHTML = ""; a.innerHTML = "";
   $("#voix-vide").hidden = !!VOIX.length;
@@ -561,7 +568,6 @@ function rendreVoix() {
   $("#w-voix-a").hidden = !a.children.length;
   if (!f.children.length) f.appendChild(el("p", "ptit", "Aucune voix féminine identifiée automatiquement."));
   if (!m.children.length) m.appendChild(el("p", "ptit", "Aucune voix masculine identifiée automatiquement."));
-  /* curseurs */
   $("#durees").innerHTML = "";
   [15, 20, 25, 30].forEach(function (d) {
     var b = el("button", p.duree === d ? "on" : "", d + " min");
@@ -588,7 +594,81 @@ function optionVoix(nom, sous, sel, onSel, onEssai) {
   return row;
 }
 
-/* ═══════════════════════════ TRANSMISSION ═══════════════════════════ */
+/* ═══════════════════════════ RPC SUPABASE (Étape C) ═══════════════════════════ */
+function rpcSupabase(fn, params) {
+  var url = supabaseUrl ? supabaseUrl() : (DB.cfg.sync.url || "").replace(/\/+$/, "");
+  var key = supabaseKey ? supabaseKey() : (DB.cfg.sync.key || "");
+  return fetch(url + "/rest/v1/rpc/" + fn, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: key, Authorization: "Bearer " + key },
+    body: JSON.stringify(params)
+  }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  });
+}
+/* ═══════════════════════════ AUTH SUPABASE (Étape B) ═══════════════════════════ */
+function supabaseUrl() { return (DB.cfg.sync.url || "").replace(/\/+$/, ""); }
+function supabaseKey() { return DB.cfg.sync.key || ""; }
+
+function loginAdmin(email, mdp) {
+  return fetch(supabaseUrl() + "/auth/v1/token?grant_type=password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: supabaseKey() },
+    body: JSON.stringify({ email: email, password: mdp })
+  }).then(function (r) {
+    if (!r.ok) return r.json().then(function (b) { throw new Error(b.error_description || b.msg || "HTTP " + r.status); });
+    return r.json();
+  });
+}
+
+function verifierAdmin(token) {
+  return fetch(supabaseUrl() + "/rest/v1/admin?select=id,nom_complet,role,actif&actif=eq.true", {
+    headers: { apikey: supabaseKey(), Authorization: "Bearer " + token }
+  }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }).then(function (rows) {
+    if (!rows.length) throw new Error("Pas admin");
+    return rows[0];
+  });
+}
+
+function refreshToken(rt) {
+  return fetch(supabaseUrl() + "/auth/v1/token?grant_type=refresh_token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: supabaseKey() },
+    body: JSON.stringify({ refresh_token: rt })
+  }).then(function (r) {
+    if (!r.ok) throw new Error("refresh échoué");
+    return r.json();
+  });
+}
+
+function sauverSessionAdmin(data, adminInfo) {
+  ETAT.token = data.access_token;
+  ETAT.refreshToken = data.refresh_token;
+  ETAT.adminId = data.user ? data.user.id : adminInfo.id;
+  ETAT.adminNom = adminInfo.nom_complet;
+  ETAT.adminRole = adminInfo.role;
+  try {
+    LS.setItem("rm.admin_session", JSON.stringify({
+      token: data.access_token,
+      refresh: data.refresh_token,
+      adminId: ETAT.adminId,
+      nom: adminInfo.nom_complet,
+      role: adminInfo.role
+    }));
+  } catch (e) {}
+}
+
+function effacerSessionAdmin() {
+  ETAT.token = null; ETAT.refreshToken = null;
+  ETAT.adminId = null; ETAT.adminNom = null; ETAT.adminRole = null;
+  try { LS.removeItem("rm.admin_session"); } catch (e) {}
+}
+/* ═══════════════════════════ TRANSMISSION SUPABASE ═══════════════════════════ */
+/* v3.1 — nouveau payload pour la table `ecoute` de la nouvelle base RELAX MIND. */
 function syncOK() { var s = DB.cfg.sync; return !!(s.actif && s.url && s.key); }
 function envoyer(silencieux) {
   if (!syncOK()) { majEtatSync(); return Promise.resolve(0); }
@@ -597,15 +677,38 @@ function envoyer(silencieux) {
   if (!navigator.onLine) { majEtatSync(); return Promise.resolve(0); }
   var s = DB.cfg.sync;
   var corps = att.map(function (x) {
-    var u = DB.users.filter(function (y) { return y.pid === x.pid; })[0] || {};
-    return { ref: x.id, pid: x.pid, groupe: u.groupe || null, seance_id: x.sid,
-             titre: seance(x.sid).titre, debut: new Date(x.debut).toISOString(), fin: new Date(x.fin).toISOString(),
-             duree_sec: x.duree, detente_avant: x.avant, detente_apres: x.apres,
-             qualite_texte: x.etoiles, remarque: x.remarque || "", app: VERSION };
+    // Récupérer les préférences de la participante pour connaître la voix utilisée
+    var pp = null;
+    try { pp = prefs(x.pid); } catch (e) {}
+    var voixSource = (pp && pp.voix && pp.voix.type === "enr") ? "humain" : "synthese";
+    return {
+      ref:           x.id,
+      pid:           x.pid,
+      seance_numero: x.sid,
+      seance_titre:  seance(x.sid).titre,
+      voix_source:   voixSource,
+      debut:         x.debut ? new Date(x.debut).toISOString() : null,
+      fin:           new Date(x.fin).toISOString(),
+      duree_sec:     x.duree,
+      detente_avant: x.avant,
+      detente_apres: x.apres,
+      qualite_texte: x.etoiles,
+      remarque:      x.remarque || "",
+      app_version:   VERSION,
+      appareil: {
+        os: navigator.platform || "",
+        ua: (navigator.userAgent || "").slice(0, 200)
+      }
+    };
   });
-  return fetch(s.url.replace(/\/+$/, "") + "/rest/v1/" + (s.table || "rm_seances"), {
+  return fetch(s.url.replace(/\/+$/, "") + "/rest/v1/" + (s.table || "ecoute"), {
     method: "POST", mode: "cors", cache: "no-store",
-    headers: { "Content-Type": "application/json", apikey: s.key, Authorization: "Bearer " + s.key, Prefer: "resolution=merge-duplicates,return=minimal" },
+    headers: {
+      "Content-Type": "application/json",
+      apikey: s.key,
+      Authorization: "Bearer " + s.key,
+      Prefer: "resolution=merge-duplicates,return=minimal"
+    },
     body: JSON.stringify(corps)
   }).then(function (r) {
     if (!r.ok) throw new Error("HTTP " + r.status);
@@ -613,9 +716,11 @@ function envoyer(silencieux) {
     saveNow(); majEtatSync();
     if (!silencieux) toast(att.length + " séance(s) transmise(s).");
     return att.length;
-  }).catch(function () {
+  }).catch(function (err) {
     majEtatSync();
     if (!silencieux) toast("Envoi impossible pour l'instant : il se fera automatiquement dès le retour du réseau.");
+    // Diagnostic optionnel dans la console
+    try { console.warn("[RELAX MIND] Envoi Supabase impossible :", err); } catch (e) {}
     return 0;
   });
 }
@@ -641,7 +746,7 @@ function csvSessions(liste) {
              x.etoiles == null ? "" : x.etoiles,
              '"' + String(x.remarque || "").replace(/"/g, "'") + '"'].join(";"));
   });
-  return "﻿" + L2.join("\n");
+  return "\uFEFF" + L2.join("\n");
 }
 
 /* ═══════════════════════════ ADMINISTRATION ═══════════════════════════ */
@@ -998,7 +1103,7 @@ function csvSynthese() {
     L2.push([s.id, '"' + s.titre + '"', l.length, Object.keys(pids).length,
              num(moy(f("avant"))), num(moy(f("apres"))), num(moy(gg)), num(moy(f("etoiles")))].join(";"));
   });
-  return "﻿" + L2.join("\n");
+  return "\uFEFF" + L2.join("\n");
 }
 
 /* ─── réglages admin ─── */
@@ -1008,18 +1113,22 @@ function rendreReglages() {
   $("#g-etude").value = DB.cfg.etude;
   var s = DB.cfg.sync;
   $("#g-url").value = s.url || ""; $("#g-key").value = s.key || "";
-  $("#g-table").value = s.table || "rm_seances"; $("#g-sync").checked = !!s.actif;
+  $("#g-table").value = s.table || "ecoute"; $("#g-sync").checked = !!s.actif;
 }
 function testerSync() {
   var s = DB.cfg.sync;
   if (!s.url || !s.key) { toast("Renseignez l'URL et la clé anonyme."); return; }
   $("#g-etat").innerHTML = "<span class='point'></span> test…";
-  fetch(s.url.replace(/\/+$/, "") + "/rest/v1/" + (s.table || "rm_seances") + "?select=ref&limit=1",
+  fetch(s.url.replace(/\/+$/, "") + "/rest/v1/" + (s.table || "ecoute") + "?select=ref&limit=1",
     { headers: { apikey: s.key, Authorization: "Bearer " + s.key } })
     .then(function (r) {
-      $("#g-etat").innerHTML = r.ok ? "<span class='point ok'></span> connexion réussie"
-                                    : "<span class='point'></span> erreur " + r.status;
-      toast(r.ok ? "Connexion à Supabase réussie." : "Échec (HTTP " + r.status + "). Vérifiez l'URL, la clé et le script SQL.");
+      // 401/403 signifie que la table existe mais la lecture est bloquée par RLS
+      // → c'est en réalité un bon signe pour la clé anon, elle a le droit d'INSERT seulement
+      var ok = r.ok || r.status === 401 || r.status === 403;
+      $("#g-etat").innerHTML = ok ? "<span class='point ok'></span> connexion OK"
+                                  : "<span class='point'></span> erreur " + r.status;
+      toast(ok ? "Connexion à Supabase réussie."
+               : "Échec (HTTP " + r.status + "). Vérifiez l'URL, la clé et le script SQL.");
     })
     .catch(function () { $("#g-etat").innerHTML = "<span class='point'></span> injoignable"; toast("Serveur injoignable."); });
 }
@@ -1027,7 +1136,7 @@ function tirerSync() {
   var s = DB.cfg.sync;
   if (!s.url || !s.key) { toast("Renseignez d'abord l'URL et la clé."); return; }
   toast("Récupération…");
-  fetch(s.url.replace(/\/+$/, "") + "/rest/v1/" + (s.table || "rm_seances") + "?select=*&order=fin.asc&limit=5000",
+  fetch(s.url.replace(/\/+$/, "") + "/rest/v1/" + (s.table || "ecoute") + "?select=*&order=fin.asc&limit=5000",
     { headers: { apikey: s.key, Authorization: "Bearer " + s.key } })
     .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(function (rows) {
@@ -1036,9 +1145,19 @@ function tirerSync() {
       rows.forEach(function (r2) {
         var id = r2.ref || ("srv" + r2.id);
         if (connus[id]) return;
-        DB.sessions.push({ id: id, pid: r2.pid, sid: r2.seance_id, debut: +new Date(r2.debut || r2.fin),
-          fin: +new Date(r2.fin), duree: r2.duree_sec || 0, avant: r2.detente_avant, apres: r2.detente_apres,
-          etoiles: r2.qualite_texte, remarque: r2.remarque || "", envoye: 1 });
+        // Compat rétro : accepte l'ancien "seance_id" (1-30) et le nouveau "seance_numero"
+        var sid = (r2.seance_numero != null) ? r2.seance_numero : r2.seance_id;
+        DB.sessions.push({
+          id: id, pid: r2.pid, sid: sid,
+          debut: +new Date(r2.debut || r2.fin),
+          fin: +new Date(r2.fin),
+          duree: r2.duree_sec || 0,
+          avant: r2.detente_avant,
+          apres: r2.detente_apres,
+          etoiles: r2.qualite_texte,
+          remarque: r2.remarque || "",
+          envoye: 1
+        });
         if (!DB.users.some(function (u) { return u.pid === r2.pid; }))
           DB.users.push({ pid: r2.pid, pin: pin4(), nom: "", groupe: r2.groupe || "", cree: Date.now() });
         n++;
@@ -1066,18 +1185,149 @@ function aller(v) {
   if (v === "voix") rendreVoix();
 }
 function entrerPart(pid, pin) {
+  // Fallback local si hors ligne ou Supabase non configuré
   var u = DB.users.filter(function (x) { return x.pid.toUpperCase() === pid.toUpperCase(); })[0];
   if (!u) return "Cet identifiant ne figure pas dans l'étude.";
-  if (String(u.pin) !== String(pin)) return "Code incorrect.";
+  if (String(u.pin).toLowerCase() !== String(pin).toLowerCase()) return "Code incorrect.";
   ETAT.role = "part"; ETAT.pid = u.pid; ETAT._p = prefs(u.pid);
   try { LS.setItem(CLE_SESS, JSON.stringify({ role: "part", pid: u.pid })); } catch (e) {}
   aller("seances");
   return null;
 }
+
+function entrerPartSupabase(pid, code, erreurFn) {
+  if (!pid || pid.length < 1) { erreurFn("Saisissez votre identifiant."); return; }
+
+  // Si pas de réseau ou Supabase non configuré → fallback local
+  if (!navigator.onLine || !DB.cfg.sync.url || !DB.cfg.sync.key) {
+    if (!code) { erreurFn("Pas de connexion réseau. Saisissez votre identifiant et votre code."); $("#f-code-login").hidden = false; return; }
+    var msg = entrerPart(pid, code);
+    if (msg) erreurFn(msg);
+    return;
+  }
+
+  $("#b-entrer").disabled = true; $("#b-entrer").textContent = "Vérification…";
+
+  // Étape 1 : si pas encore de code saisi, on vérifie d'abord le PID
+  if (!code) {
+    rpcSupabase("login_participante", { p_pid: pid.toUpperCase(), p_code: "" })
+      .then(function (res) {
+        if (res.raison === "premier_acces") {
+          afficherCreationCode(res.pid);
+        } else if (res.raison === "code_incorrect" || res.ok === false && res.raison !== "pid_inconnu") {
+          // Le PID existe et a un code → afficher le champ code
+          $("#f-code-login").hidden = false;
+          $("#in-pin").focus();
+          $("#b-entrer").textContent = "Se connecter";
+        } else if (res.raison === "pid_inconnu") {
+          erreurFn("Cet identifiant n'est pas encore enregistré dans l'étude.");
+        } else {
+          erreurFn("Erreur inattendue.");
+        }
+      })
+      .catch(function () {
+        erreurFn("Pas de connexion réseau.");
+      })
+      .then(function () {
+        $("#b-entrer").disabled = false;
+        if ($("#b-entrer").textContent === "Vérification…") $("#b-entrer").textContent = "Entrer";
+      });
+    return;
+  }
+
+  // Étape 2 : PID + code → connexion réelle
+  rpcSupabase("login_participante", { p_pid: pid.toUpperCase(), p_code: code.toLowerCase() })
+    .then(function (res) {
+      if (res.ok) {
+        // Sauver en local pour le hors-ligne
+        if (!DB.users.some(function (u) { return u.pid.toUpperCase() === res.pid.toUpperCase(); })) {
+          DB.users.push({ pid: res.pid, pin: code.toLowerCase(), nom: "", groupe: res.groupe || "", cree: Date.now() });
+        } else {
+          DB.users.forEach(function (u) { if (u.pid.toUpperCase() === res.pid.toUpperCase()) u.pin = code.toLowerCase(); });
+        }
+        saveNow();
+        ETAT.role = "part"; ETAT.pid = res.pid; ETAT._p = prefs(res.pid);
+        try { LS.setItem(CLE_SESS, JSON.stringify({ role: "part", pid: res.pid })); } catch (e) {}
+        aller("seances");
+      } else if (res.raison === "premier_acces") {
+        afficherCreationCode(res.pid);
+      } else if (res.raison === "code_incorrect") {
+        erreurFn("Code incorrect. Vérifiez : 3 dernières lettres du mois + jour (2 chiffres) + 2 dernières lettres du nom.");
+      } else if (res.raison === "pid_inconnu") {
+        erreurFn("Cet identifiant n'est pas encore enregistré dans l'étude.");
+      } else {
+        erreurFn("Connexion refusée.");
+      }
+    })
+    .catch(function () {
+      var msg = entrerPart(pid, code);
+      if (msg) erreurFn(msg);
+    })
+    .then(function () {
+      $("#b-entrer").disabled = false;
+      if ($("#b-entrer").textContent === "Vérification…") $("#b-entrer").textContent = "Entrer";
+    });
+}
+
+function afficherCreationCode(pid) {
+  ETAT._pidEnCours = pid;
+  $("#f-code-login").hidden = true;
+  $("#f-code-creation").hidden = false;
+  $("#in-code-new").value = "";
+  $("#in-code-confirm").value = "";
+  $("#in-code-new").focus();
+  $("#b-entrer").textContent = "Créer mon code";
+  $("#b-entrer").disabled = false;
+}
+
+function creerCodeSupabase(erreurFn) {
+  var pid = ETAT._pidEnCours;
+  var c1 = ($("#in-code-new").value || "").trim().toLowerCase();
+  var c2 = ($("#in-code-confirm").value || "").trim().toLowerCase();
+
+  if (!c1) { erreurFn("Saisissez votre code."); return; }
+  if (!/^[a-z]{3}[0-9]{2}[a-z]{2}$/.test(c1)) {
+    erreurFn("Format incorrect. Le code doit faire 7 caractères : 3 lettres + 2 chiffres + 2 lettres. Exemple : ier05op");
+    return;
+  }
+  if (c1 !== c2) { erreurFn("Les deux codes ne correspondent pas."); return; }
+
+  $("#b-entrer").disabled = true; $("#b-entrer").textContent = "Enregistrement…";
+
+  rpcSupabase("definir_code_participante", { p_pid: pid, p_code: c1 })
+    .then(function (res) {
+      if (res.ok) {
+        toast("Code créé. Bienvenue !");
+        // Maintenant connecter directement
+        $("#f-code-creation").hidden = true;
+        $("#f-code-login").hidden = false;
+        entrerPartSupabase(pid, c1, erreurFn);
+      } else if (res.raison === "format_invalide") {
+        erreurFn("Format incorrect : 3 lettres + 2 chiffres + 2 lettres. Exemple : ier05op");
+      } else if (res.raison === "code_deja_defini") {
+        erreurFn("Un code existe déjà pour cet identifiant. Essayez de vous connecter normalement.");
+        $("#f-code-creation").hidden = true;
+        $("#f-code-login").hidden = false;
+      } else {
+        erreurFn("Erreur : " + (res.raison || "inconnue"));
+      }
+    })
+    .catch(function () {
+      erreurFn("Pas de connexion réseau. La création du code nécessite Internet.");
+    })
+    .then(function () {
+      $("#b-entrer").disabled = false; $("#b-entrer").textContent = "Entrer";
+    });
+}
 function sortir() {
   ETAT.role = null; ETAT.pid = null; ETAT._p = null;
+  effacerSessionAdmin();
   try { LS.removeItem(CLE_SESS); } catch (e) {}
-  $("#in-pid").value = ""; $("#in-pin").value = ""; $("#in-adm").value = "";
+  $("#in-pid").value = ""; $("#in-pin").value = "";
+  if ($("#in-adm-email")) $("#in-adm-email").value = "";
+  $("#in-adm").value = "";
+    $("#f-code-login").hidden = true;
+  $("#f-code-creation").hidden = true;
   aller("porte");
 }
 
@@ -1110,7 +1360,6 @@ function init() {
   ciel();
   $("#version").textContent = "RELAX MIND · version " + VERSION + " · 30 séances";
 
-  /* porte */
   $$("#ong-porte button").forEach(function (b) {
     b.onclick = function () {
       $$("#ong-porte button").forEach(function (x) { x.classList.remove("on"); });
@@ -1121,38 +1370,50 @@ function init() {
     };
   });
   function erreur(m) { var e = $("#err-porte"); e.textContent = m; e.style.display = "block"; }
-  function tenter() {
+    function tenter() {
     $("#err-porte").style.display = "none";
     if ($("#f-adm").hidden) {
-      var m = entrerPart($("#in-pid").value.trim(), $("#in-pin").value.trim());
-      if (m) erreur(m);
+      // Mode création de code (première connexion)
+      if (!$("#f-code-creation").hidden) {
+        creerCodeSupabase(erreur);
+        return;
+      }
+      // Mode connexion normal → via Supabase
+      // Mode connexion : étape 1 (PID seul) ou étape 2 (PID + code)
+      var codeSaisi = $("#f-code-login").hidden ? "" : ($("#in-pin").value || "").trim();
+      entrerPartSupabase(
+        $("#in-pid").value.trim(),
+        codeSaisi,
+        erreur
+      );
     } else {
+      var email = ($("#in-adm-email") ? $("#in-adm-email").value.trim() : "");
       var mdp = $("#in-adm").value;
-      if (!mdp) { erreur("Saisissez le mot de passe."); return; }
-      $("#b-entrer").disabled = true; $("#b-entrer").textContent = "Vérification…";
-      derive(mdp, CFG.admin.salt, CFG.admin.iter).then(function (h) {
+      if (!email || !mdp) { erreur("Saisissez l'email et le mot de passe."); return; }
+      $("#b-entrer").disabled = true; $("#b-entrer").textContent = "Connexion…";
+      loginAdmin(email, mdp).then(function (data) {
+        return verifierAdmin(data.access_token).then(function (info) {
+          sauverSessionAdmin(data, info);
+          ETAT.role = "adm"; ETAT.pid = null;
+          aller("admin"); admOnglet("bord");
+        });
+      }).catch(function (err) {
+        erreur("Connexion refusée : vérifiez vos identifiants ou votre connexion réseau.");
+      }).then(function () {
         $("#b-entrer").disabled = false; $("#b-entrer").textContent = "Entrer";
-        if (h !== CFG.admin.hash) { erreur("Mot de passe incorrect."); return; }
-        ETAT.role = "adm"; ETAT.pid = null;
-        aller("admin"); admOnglet("bord");
-      }).catch(function () {
-        $("#b-entrer").disabled = false; $("#b-entrer").textContent = "Entrer";
-        erreur("Vérification impossible sur ce navigateur.");
       });
     }
   }
   $("#b-entrer").onclick = tenter;
-  ["#in-pid", "#in-pin", "#in-adm"].forEach(function (s) {
-    $(s).addEventListener("keydown", function (e) { if (e.key === "Enter") tenter(); });
+  ["#in-pid", "#in-pin", "#in-adm-email", "#in-adm", "#in-code-new", "#in-code-confirm"].forEach(function (s) {
+    if ($(s)) $(s).addEventListener("keydown", function (e) { if (e.key === "Enter") tenter(); });
   });
 
-  /* navigation */
   $$("#nav button").forEach(function (b) { b.onclick = function () { aller(b.dataset.v); }; });
   $("#b-retour").onclick = function () { aller("seances"); };
   $("#b-sortir").onclick = sortir;
   $("#b-adm-sortir").onclick = sortir;
 
-  /* lecteur */
   $("#b-lire").onclick = lirePause;
   $("#b-stop").onclick = function () {
     stopTout(); L.i = 0; L.ecoule = 0; arc(0);
@@ -1168,14 +1429,12 @@ function init() {
   };
   document.addEventListener("visibilitychange", function () { if (document.hidden && L.lit) pause(); });
 
-  /* feuille */
   $("#fe-ok").onclick = function () {
     if (fVal === null) { toast("Choisissez un chiffre de 0 à 10."); return; }
     fermerEchelle(true);
   };
   $("#fe-skip").onclick = function () { fermerEchelle(false); };
 
-  /* réglages participante */
   $("#r-rate").oninput = function () { majPrefs(function (p) { p.rate = +this.value; }.bind(this)); rendreVoix(); };
   $("#r-pitch").oninput = function () { majPrefs(function (p) { p.pitch = +this.value; }.bind(this)); rendreVoix(); };
   $("#r-sil").oninput = function () { majPrefs(function (p) { p.sil = +this.value; }.bind(this)); rendreVoix(); };
@@ -1193,10 +1452,8 @@ function init() {
   };
   addEventListener("online", function () { envoyer(true); });
 
-  /* admin : onglets */
   $$("#ong-admin button").forEach(function (b) { b.onclick = function () { admOnglet(b.dataset.t); }; });
 
-  /* admin : participantes */
   $("#b-u-add").onclick = function () {
     var lignes = $("#u-in").value.split(/\r?\n/).map(function (x) { return x.trim(); }).filter(Boolean);
     if (!lignes.length) { toast("Collez d'abord les identifiants T0."); return; }
@@ -1213,11 +1470,10 @@ function init() {
   $("#b-u-csv").onclick = function () {
     var L2 = ["identifiant_t0;code;groupe;cree_le"];
     DB.users.forEach(function (u) { L2.push([u.pid, u.pin, u.groupe || "", new Date(u.cree).toISOString().slice(0, 10)].join(";")); });
-    saveAs("﻿" + L2.join("\n"), "relaxmind-participantes.csv", "text/csv;charset=utf-8");
+    saveAs("\uFEFF" + L2.join("\n"), "relaxmind-participantes.csv", "text/csv;charset=utf-8");
   };
   $("#b-u-fiches").onclick = function () { saveAs(fichesHTML(), "relaxmind-fiches.html", "text/html;charset=utf-8"); };
 
-  /* admin : textes */
   ["t-titre", "t-theme", "t-obj", "t-texte"].forEach(function (id) { $("#" + id).addEventListener("input", sauverEditeur); });
   ["c-rate", "c-sil", "c-duree"].forEach(function (id) { $("#" + id).addEventListener("input", function () { majCadenceAff(); sauverEditeur(); }); });
   $("#c-perso").addEventListener("change", sauverEditeur);
@@ -1245,7 +1501,6 @@ function init() {
     delete DB.textes[tSel]; saveNow(); chargerEditeur(); rendreListeTextes(); toast("Texte d'origine restauré.");
   };
 
-  /* admin : studio */
   $("#s-jeu").onchange = function () { ST.jeu = this.value || null; rendreListeStudio(); rendreBlocs(); };
   $("#b-jeu-new").onclick = function () {
     var n = prompt("Nom de ce jeu de voix :\n(par exemple « Ma voix douce », « Voix grave », « Voix de Fatou »)");
@@ -1277,7 +1532,6 @@ function init() {
   $("#b-ecouter").onclick = function () { if (ST.blocs[ST.sel]) ecouterClip(ST.blocs[ST.sel].k); };
   $("#b-zip").onclick = exporterZip;
 
-  /* admin : synthèse */
   $("#b-s-csv").onclick = function () {
     if (!DB.sessions.length) { toast("Aucune donnée."); return; }
     saveAs(csvSessions(DB.sessions), "relaxmind-donnees-" + new Date().toISOString().slice(0, 10) + ".csv", "text/csv;charset=utf-8");
@@ -1286,7 +1540,6 @@ function init() {
     saveAs(csvSynthese(), "relaxmind-synthese-" + new Date().toISOString().slice(0, 10) + ".csv", "text/csv;charset=utf-8");
   };
 
-  /* admin : réglages */
   $("#g-delai").onchange = function () { DB.cfg.delaiHeures = Math.max(0, +this.value || 0); saveNow(); toast("Délai : " + DB.cfg.delaiHeures + " h."); };
   $("#g-duree").onchange = function () { DB.cfg.dureeDefaut = +this.value || 20; saveNow(); };
   $("#g-etude").oninput = function () { DB.cfg.etude = this.value; save(); };
@@ -1326,27 +1579,33 @@ function init() {
       .then(function () { try { LS.removeItem(CLE); LS.removeItem(CLE_SESS); } catch (e) {} location.reload(); });
   };
 
-  /* voix du navigateur */
   if (synth) { chargerVoix(); synth.onvoiceschanged = chargerVoix; setTimeout(chargerVoix, 900); }
 
-  /* session précédente */
   var s = null;
   try { s = JSON.parse(LS.getItem(CLE_SESS) || "null"); } catch (e) {}
   if (s && s.role === "part" && DB.users.some(function (u) { return u.pid === s.pid; })) {
     ETAT.role = "part"; ETAT.pid = s.pid; ETAT._p = prefs(s.pid);
     aller("seances");
-  } else aller("porte");
-
-  setInterval(function () { if (ETAT.vue === "seances") rendreListe(); }, 60000);
-
-  if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
-    navigator.serviceWorker.register("sw.js").catch(function () {});
+  } else {
+    var adm = null;
+    try { adm = JSON.parse(LS.getItem("rm.admin_session") || "null"); } catch (e) {}
+    if (adm && adm.token && adm.refresh) {
+      refreshToken(adm.refresh).then(function (data) {
+        return verifierAdmin(data.access_token).then(function (info) {
+          sauverSessionAdmin(data, info);
+          ETAT.role = "adm"; ETAT.pid = null;
+          aller("admin"); admOnglet("bord");
+        });
+      }).catch(function () {
+        effacerSessionAdmin();
+        aller("porte");
+      });
+    } else aller("porte");
   }
 }
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
 
-/* crochet de test */
 window.RM = {
   vitesse: 1,
   get db() { return DB; },

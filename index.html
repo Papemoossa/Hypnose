@@ -272,17 +272,40 @@ th{color:var(--txt-3);font-weight:560;font-size:10.5px;text-transform:uppercase;
 
     <div id="f-part">
       <div class="eti">Votre identifiant</div>
-      <input type="text" id="in-pid" placeholder="Ex. T0-014" autocomplete="off" spellcheck="false"
-             autocapitalize="characters" maxlength="24" enterkeyhint="go" style="letter-spacing:.08em">
-      <div class="eti" style="margin:14px 0 10px">Votre code à 4 chiffres</div>
-      <input type="password" id="in-pin" placeholder="••••" inputmode="numeric" maxlength="8"
-             autocomplete="off" enterkeyhint="go" style="letter-spacing:.3em;text-align:center">
-      <p class="ptit" style="margin-top:12px">Ces informations vous ont été remises par la responsable de l'étude.</p>
+      <input type="text" id="in-pid" placeholder="Ex. UP07T" autocomplete="off" spellcheck="false"
+             autocapitalize="characters" maxlength="32" enterkeyhint="go" style="letter-spacing:.12em;text-transform:uppercase">
+      <p class="ptit" style="margin-top:6px;opacity:.65">Dernière lettre prénom + dernière lettre nom + jour de naissance (2 chiffres) + première lettre lieu de naissance.</p>
+
+      <div id="f-code-login" hidden style="margin-top:14px">
+        <div class="eti">Votre code personnel</div>
+        <input type="text" id="in-pin" placeholder="ex. jan05de" autocomplete="off" spellcheck="false"
+               autocapitalize="none" maxlength="7" enterkeyhint="go" style="letter-spacing:.1em">
+        <p class="ptit" style="margin-top:6px;opacity:.65">3 dernières lettres de votre mois de naissance + jour (2 chiffres) + 2 dernières lettres de votre nom.</p>
+      </div>
+
+      <div id="f-code-creation" hidden>
+        <div class="ligne"></div>
+        <h3 style="font-size:17px;margin-bottom:8px;color:var(--turquoise-c)">Première connexion — créez votre code</h3>
+        <p class="ptit" style="margin-bottom:12px">Ce code vous servira à vous reconnecter. Composez-le en <b>minuscules</b>, en suivant cet ordre :</p>
+        <p class="ptit" style="margin-bottom:4px"><b>1.</b> Les 3 dernières lettres de votre <b>mois de naissance</b><br>
+          <span style="opacity:.7">(janvier → <b>ier</b>, février → <b>ier</b>, mars → <b>ars</b>, avril → <b>ril</b>, mai → <b>mai</b>, juin → <b>uin</b>, juillet → <b>let</b>, août → <b>out</b>, septembre → <b>bre</b>, octobre → <b>bre</b>, novembre → <b>bre</b>, décembre → <b>bre</b>)</span></p>
+        <p class="ptit" style="margin-bottom:4px"><b>2.</b> Les 2 chiffres du <b>jour</b> de votre naissance <span style="opacity:.7">(le 5 → 05, le 23 → 23)</span></p>
+        <p class="ptit" style="margin-bottom:12px"><b>3.</b> Les 2 dernières lettres de votre <b>nom de famille</b></p>
+        <p class="ptit" style="margin-bottom:14px;color:var(--or)"><b>Exemple :</b> née en janvier, le 5, nom Diop → <b>ier05op</b></p>
+        <div class="eti">Votre code</div>
+        <input type="text" id="in-code-new" placeholder="ex. ier05op" autocomplete="off" spellcheck="false"
+               autocapitalize="none" maxlength="7" enterkeyhint="next" style="letter-spacing:.12em">
+        <div class="eti" style="margin-top:12px">Confirmez votre code</div>
+        <input type="text" id="in-code-confirm" placeholder="retapez le même code" autocomplete="off" spellcheck="false"
+               autocapitalize="none" maxlength="7" enterkeyhint="go" style="letter-spacing:.12em">
+      </div>
     </div>
 
     <div id="f-adm" hidden>
-      <div class="eti">Mot de passe administrateur</div>
-      <input type="password" id="in-adm" placeholder="Mot de passe" autocomplete="off" enterkeyhint="go">
+      <div class="eti">Email administrateur</div>
+      <input type="text" id="in-adm-email" placeholder="votre@email.com" autocomplete="email" inputmode="email" enterkeyhint="next">
+      <div class="eti" style="margin:14px 0 10px">Mot de passe</div>
+      <input type="password" id="in-adm" placeholder="Mot de passe" autocomplete="current-password" enterkeyhint="go">
       <p class="ptit" style="margin-top:12px">Accès réservé à la responsable de l'étude.</p>
     </div>
 
