@@ -4,7 +4,7 @@
    ne fournit que les valeurs de départ.
    ========================================================================== */
 var RM_CONFIG = {
-  version: "3.1.0",  // v3.1 : branchement sur la nouvelle base Supabase (table ecoute)
+  version: "3.2.0",  // v3.1 : branchement sur la nouvelle base Supabase (table ecoute)
   etude: "Auto-hypnose et stress professionnel — district sanitaire de Diourbel",
 
   /* ---- protocole ---- */

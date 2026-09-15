@@ -2,6 +2,13 @@
    RELAX MIND — application
    Aucune dépendance externe. Fonctionne hors connexion.
 
+   v3.2 (2026-09) — Étape D : historique bidirectionnel Supabase
+     • tirerHistorique() : récupère l'historique d'une participante via
+       la RPC historique_participante (SECURITY DEFINER).
+     • Connexion participante : récupère l'historique après login.
+     • Reprise de session : synchronise en arrière-plan.
+     • Bouton "Envoyer" : bidirectionnel (push + pull).
+   ─────────────────────────────────────────────────────────────
    v3.1 (2026-09) — Étape A : branchement sur la nouvelle base Supabase
      • envoyer()   : nouveau payload (seance_numero, seance_titre, voix_source,
                      app_version, appareil) ciblant la table `ecoute`.
@@ -13,7 +20,7 @@
 "use strict";
 
 var CFG = window.RM_CONFIG || {};
-var VERSION = CFG.version || "3.1.0";
+var VERSION = CFG.version || "3.2.0";
 
 /* ═══════════════════════════════ OUTILS ═══════════════════════════════ */
 var $  = function (s) { return document.querySelector(s); };
@@ -677,7 +684,6 @@ function envoyer(silencieux) {
   if (!navigator.onLine) { majEtatSync(); return Promise.resolve(0); }
   var s = DB.cfg.sync;
   var corps = att.map(function (x) {
-    // Récupérer les préférences de la participante pour connaître la voix utilisée
     var pp = null;
     try { pp = prefs(x.pid); } catch (e) {}
     var voixSource = (pp && pp.voix && pp.voix.type === "enr") ? "humain" : "synthese";
@@ -719,11 +725,61 @@ function envoyer(silencieux) {
   }).catch(function (err) {
     majEtatSync();
     if (!silencieux) toast("Envoi impossible pour l'instant : il se fera automatiquement dès le retour du réseau.");
-    // Diagnostic optionnel dans la console
     try { console.warn("[RELAX MIND] Envoi Supabase impossible :", err); } catch (e) {}
     return 0;
   });
 }
+
+/* ═══════════════════════════ ÉTAPE D — HISTORIQUE ═══════════════════════════ */
+/* Récupère l'historique d'une participante via la RPC historique_participante
+   (SECURITY DEFINER : vérifie le code avant de renvoyer les écoutes).
+   Fusionne dans DB.sessions sans créer de doublons (clé = ref). */
+function tirerHistorique(pid, code) {
+  if (!syncOK()) return Promise.resolve(0);
+  if (!navigator.onLine) return Promise.resolve(0);
+  if (!code) return Promise.resolve(0);
+
+  return rpcSupabase("historique_participante", {
+    p_pid: pid.toUpperCase(),
+    p_code: code.toLowerCase()
+  })
+  .then(function (res) {
+    if (!res || !res.ok || !res.ecoutes) return 0;
+
+    // Index des refs déjà connues localement
+    var connus = {};
+    DB.sessions.forEach(function (s) { connus[s.id] = 1; });
+
+    var n = 0;
+    res.ecoutes.forEach(function (e) {
+      var ref = e.ref || ("srv_" + e.fin);
+      if (connus[ref]) return;
+
+      DB.sessions.push({
+        id:       ref,
+        pid:      e.pid,
+        sid:      e.seance_numero,
+        debut:    e.debut ? +new Date(e.debut) : +new Date(e.fin),
+        fin:      +new Date(e.fin),
+        duree:    e.duree_sec || 0,
+        avant:    e.detente_avant,
+        apres:    e.detente_apres,
+        etoiles:  e.qualite_texte,
+        remarque: e.remarque || "",
+        envoye:   1   // déjà sur le serveur
+      });
+      n++;
+    });
+
+    if (n > 0) saveNow();
+    return n;
+  })
+  .catch(function (err) {
+    try { console.warn("[RELAX MIND] Historique impossible :", err); } catch (e) {}
+    return 0;
+  });
+}
+
 function majEtatSync() {
   var e = $("#etat-sync"); if (!e) return;
   if (!syncOK()) { e.textContent = "Transmission automatique non activée. Vos données restent sur cet appareil."; return; }
@@ -1000,7 +1056,7 @@ function ecouterClip(k) {
   });
 }
 
-/* ─── ZIP (méthode « stockage », sans compression) ─── */
+/* ─── ZIP ─── */
 var CRC = (function () { var t = [], c, n, k; for (n = 0; n < 256; n++) { c = n; for (k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
 function crc32(u8) { var c = 0xFFFFFFFF; for (var i = 0; i < u8.length; i++) c = CRC[(c ^ u8[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
 function zip(fichiers) {
@@ -1122,8 +1178,6 @@ function testerSync() {
   fetch(s.url.replace(/\/+$/, "") + "/rest/v1/" + (s.table || "ecoute") + "?select=ref&limit=1",
     { headers: { apikey: s.key, Authorization: "Bearer " + s.key } })
     .then(function (r) {
-      // 401/403 signifie que la table existe mais la lecture est bloquée par RLS
-      // → c'est en réalité un bon signe pour la clé anon, elle a le droit d'INSERT seulement
       var ok = r.ok || r.status === 401 || r.status === 403;
       $("#g-etat").innerHTML = ok ? "<span class='point ok'></span> connexion OK"
                                   : "<span class='point'></span> erreur " + r.status;
@@ -1145,7 +1199,6 @@ function tirerSync() {
       rows.forEach(function (r2) {
         var id = r2.ref || ("srv" + r2.id);
         if (connus[id]) return;
-        // Compat rétro : accepte l'ancien "seance_id" (1-30) et le nouveau "seance_numero"
         var sid = (r2.seance_numero != null) ? r2.seance_numero : r2.seance_id;
         DB.sessions.push({
           id: id, pid: r2.pid, sid: sid,
@@ -1185,7 +1238,6 @@ function aller(v) {
   if (v === "voix") rendreVoix();
 }
 function entrerPart(pid, pin) {
-  // Fallback local si hors ligne ou Supabase non configuré
   var u = DB.users.filter(function (x) { return x.pid.toUpperCase() === pid.toUpperCase(); })[0];
   if (!u) return "Cet identifiant ne figure pas dans l'étude.";
   if (String(u.pin).toLowerCase() !== String(pin).toLowerCase()) return "Code incorrect.";
@@ -1198,7 +1250,6 @@ function entrerPart(pid, pin) {
 function entrerPartSupabase(pid, code, erreurFn) {
   if (!pid || pid.length < 1) { erreurFn("Saisissez votre identifiant."); return; }
 
-  // Si pas de réseau ou Supabase non configuré → fallback local
   if (!navigator.onLine || !DB.cfg.sync.url || !DB.cfg.sync.key) {
     if (!code) { erreurFn("Pas de connexion réseau. Saisissez votre identifiant et votre code."); $("#f-code-login").hidden = false; return; }
     var msg = entrerPart(pid, code);
@@ -1208,14 +1259,12 @@ function entrerPartSupabase(pid, code, erreurFn) {
 
   $("#b-entrer").disabled = true; $("#b-entrer").textContent = "Vérification…";
 
-  // Étape 1 : si pas encore de code saisi, on vérifie d'abord le PID
   if (!code) {
     rpcSupabase("login_participante", { p_pid: pid.toUpperCase(), p_code: "" })
       .then(function (res) {
         if (res.raison === "premier_acces") {
           afficherCreationCode(res.pid);
         } else if (res.raison === "code_incorrect" || res.ok === false && res.raison !== "pid_inconnu") {
-          // Le PID existe et a un code → afficher le champ code
           $("#f-code-login").hidden = false;
           $("#in-pin").focus();
           $("#b-entrer").textContent = "Se connecter";
@@ -1248,7 +1297,12 @@ function entrerPartSupabase(pid, code, erreurFn) {
         saveNow();
         ETAT.role = "part"; ETAT.pid = res.pid; ETAT._p = prefs(res.pid);
         try { LS.setItem(CLE_SESS, JSON.stringify({ role: "part", pid: res.pid })); } catch (e) {}
-        aller("seances");
+
+        // ══ ÉTAPE D : récupérer l'historique depuis Supabase ══
+        tirerHistorique(res.pid, code).then(function (n) {
+          if (n > 0) toast(n + " séance(s) récupérée(s) depuis le serveur.");
+          aller("seances");
+        });
       } else if (res.raison === "premier_acces") {
         afficherCreationCode(res.pid);
       } else if (res.raison === "code_incorrect") {
@@ -1298,7 +1352,6 @@ function creerCodeSupabase(erreurFn) {
     .then(function (res) {
       if (res.ok) {
         toast("Code créé. Bienvenue !");
-        // Maintenant connecter directement
         $("#f-code-creation").hidden = true;
         $("#f-code-login").hidden = false;
         entrerPartSupabase(pid, c1, erreurFn);
@@ -1326,7 +1379,7 @@ function sortir() {
   $("#in-pid").value = ""; $("#in-pin").value = "";
   if ($("#in-adm-email")) $("#in-adm-email").value = "";
   $("#in-adm").value = "";
-    $("#f-code-login").hidden = true;
+  $("#f-code-login").hidden = true;
   $("#f-code-creation").hidden = true;
   aller("porte");
 }
@@ -1370,16 +1423,13 @@ function init() {
     };
   });
   function erreur(m) { var e = $("#err-porte"); e.textContent = m; e.style.display = "block"; }
-    function tenter() {
+  function tenter() {
     $("#err-porte").style.display = "none";
     if ($("#f-adm").hidden) {
-      // Mode création de code (première connexion)
       if (!$("#f-code-creation").hidden) {
         creerCodeSupabase(erreur);
         return;
       }
-      // Mode connexion normal → via Supabase
-      // Mode connexion : étape 1 (PID seul) ou étape 2 (PID + code)
       var codeSaisi = $("#f-code-login").hidden ? "" : ($("#in-pin").value || "").trim();
       entrerPartSupabase(
         $("#in-pid").value.trim(),
@@ -1445,7 +1495,20 @@ function init() {
     try { synth.cancel(); } catch (e) {}
     synth.speak(parler("Installez-vous confortablement. Respirez lentement… et laissez vos épaules descendre."));
   };
-  $("#b-envoyer").onclick = function () { envoyer(false); };
+
+  // ══ ÉTAPE D : bouton "Envoyer" bidirectionnel (push + pull) ══
+  $("#b-envoyer").onclick = function () {
+    envoyer(false).then(function () {
+      var u_local = DB.users.filter(function (u) { return u.pid === ETAT.pid; })[0];
+      if (u_local && u_local.pin) {
+        return tirerHistorique(ETAT.pid, u_local.pin);
+      }
+      return 0;
+    }).then(function (n) {
+      if (n > 0) { rendreListe(); rendreJournal(); toast(n + " séance(s) récupérée(s) du serveur."); }
+    });
+  };
+
   $("#b-csv-moi").onclick = function () {
     var l = mesSessions(); if (!l.length) { toast("Aucune donnée."); return; }
     saveAs(csvSessions(l), "relaxmind_" + ETAT.pid + ".csv", "text/csv;charset=utf-8");
@@ -1581,10 +1644,20 @@ function init() {
 
   if (synth) { chargerVoix(); synth.onvoiceschanged = chargerVoix; setTimeout(chargerVoix, 900); }
 
+  // ══ Restauration de session ══
   var s = null;
   try { s = JSON.parse(LS.getItem(CLE_SESS) || "null"); } catch (e) {}
   if (s && s.role === "part" && DB.users.some(function (u) { return u.pid === s.pid; })) {
     ETAT.role = "part"; ETAT.pid = s.pid; ETAT._p = prefs(s.pid);
+
+    // ══ ÉTAPE D : synchroniser l'historique en arrière-plan à la reprise ══
+    var u_local = DB.users.filter(function (u) { return u.pid === s.pid; })[0];
+    if (u_local && u_local.pin) {
+      tirerHistorique(s.pid, u_local.pin).then(function (n) {
+        if (n > 0) { rendreListe(); rendreJournal(); toast(n + " séance(s) synchronisée(s)."); }
+      });
+    }
+
     aller("seances");
   } else {
     var adm = null;
